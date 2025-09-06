@@ -1,0 +1,35 @@
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE IF NOT EXISTS shipments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tracking TEXT UNIQUE NOT NULL,
+    title TEXT NOT NULL DEFAULT 'Consignment',
+    origin_lat REAL NOT NULL,
+    origin_lng REAL NOT NULL,
+    dest_lat REAL NOT NULL,
+    dest_lng REAL NOT NULL,
+    status TEXT NOT NULL DEFAULT 'Created',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS checkpoints (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    shipment_id INTEGER NOT NULL,
+    position INTEGER NOT NULL DEFAULT 0,
+    lat REAL NOT NULL,
+    lng REAL NOT NULL,
+    label TEXT NOT NULL DEFAULT 'Scanned',
+    note TEXT,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (shipment_id) REFERENCES shipments(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS subscribers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    shipment_id INTEGER NOT NULL,
+    email TEXT NOT NULL,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (shipment_id) REFERENCES shipments(id) ON DELETE CASCADE
+);
