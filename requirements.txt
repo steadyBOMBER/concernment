@@ -1,39 +1,15 @@
-# Essential Flask and extensions
 Flask==3.0.2
 Flask-SQLAlchemy==3.1.1
 Flask-JWT-Extended==4.6.0
 Flask-Limiter==3.6.0
 Flask-SocketIO==5.3.6
-
-# Asynchronous tasks & dependencies
 celery==5.4.0
 redis==5.0.4
-
-# Validation and utils
 pydantic==2.7.2
 email-validator==2.2.0
 python-dotenv==1.0.1
 requests==2.31.0
-
-# Security
 Werkzeug==3.0.3
-
-# Telegram bot integration
 python-telegram-bot==20.8
-
-# For email sending (if using SMTP directly)
-smtplib  # built-in, no need to list; if using a package, add 'secure-smtplib'
-
-# For compatibility (if running on Heroku/Render with Postgres)
 psycopg2-binary==2.9.9
-
-# Optional (for command line colored logs, better dev experience)
 coloredlogs==15.0.1
-
-# Only include if you use them in code
-# gunicorn==21.2.0
-
-# Notes:
-# - Flask-SocketIO 5.x is compatible with Flask 3.x
-# - python-telegram-bot 20.x uses asyncio and is the current stable
-# - Remove or add lines as needed based on your actual imports
