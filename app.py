@@ -1,5 +1,5 @@
 """
-Main Flask app for Consignment Tracker (updated for thread-safety, validation, security, and async email).
+Main Flask app for Consignment Tracker (updated for thread-safety, validation, security, async email, and cloud-ready DB handling).
 """
 
 import os
@@ -17,16 +17,24 @@ from flask_jwt_extended import JWTManager, create_access_token, jwt_required
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from flask_sqlalchemy import SQLAlchemy
-from flask_socketio import SocketIO
+from flask_socketio import SocketIO, emit
 from celery import Celery
 from pydantic import BaseModel, Field, ValidationError
 from werkzeug.security import generate_password_hash, check_password_hash
 
-# Initialize Flask app
+# --- Configuration and Initialization ---
+
+def get_database_url():
+    """Patch for Render and other platforms that provide DATABASE_URL with 'postgres://' scheme."""
+    url = os.environ.get("DATABASE_URL", "sqlite:///consignment.db")
+    if url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql://", 1)
+    return url
+
 app = Flask(__name__, static_folder="static", template_folder="templates")
 app.config.from_mapping(
     SECRET_KEY=os.environ.get("SECRET_KEY", "dev-secret"),
-    SQLALCHEMY_DATABASE_URI=os.environ.get("DATABASE_URL", "sqlite:///consignment.db"),
+    SQLALCHEMY_DATABASE_URI=get_database_url(),
     SQLALCHEMY_TRACK_MODIFICATIONS=False,
     JWT_SECRET_KEY=os.environ.get("JWT_SECRET_KEY", "super-secret-key"),
     CELERY_BROKER_URL=os.environ.get("REDIS_URL", "redis://localhost:6379/0"),
@@ -39,18 +47,16 @@ app.config.from_mapping(
     APP_BASE_URL=os.environ.get("APP_BASE_URL", "http://localhost:5000")
 )
 
-# Initialize extensions
 db = SQLAlchemy(app)
 jwt = JWTManager(app)
 socketio = SocketIO(app, cors_allowed_origins="*")
 celery = Celery(app.name, broker=app.config["CELERY_BROKER_URL"])
 celery.conf.update(app.config)
 
-# Rate limiting (Flask-Limiter v3+ compatible)
 limiter = Limiter(key_func=get_remote_address)
 limiter.init_app(app)
 
-# Models
+# --- Models ---
 class Shipment(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     tracking = db.Column(db.String(50), unique=True, nullable=False)
@@ -103,7 +109,7 @@ class Subscriber(db.Model):
     email = db.Column(db.String(100), nullable=False)
     is_active = db.Column(db.Boolean, default=True)
 
-# Pydantic models for validation
+# --- Pydantic models for validation ---
 class CheckpointCreate(BaseModel):
     lat: float = Field(..., ge=-90, le=90)
     lng: float = Field(..., ge=-180, le=180)
@@ -117,7 +123,7 @@ class ShipmentCreate(BaseModel):
     destination: Dict[str, float]
     status: str = "Created"
 
-# Security headers
+# --- Security headers ---
 @app.after_request
 def set_security_headers(response):
     headers = {
@@ -130,7 +136,7 @@ def set_security_headers(response):
         response.headers.setdefault(k, v)
     return response
 
-# Routes
+# --- Routes ---
 @app.route("/")
 def index():
     return render_template("index.html")
@@ -141,7 +147,7 @@ def track_page(tracking):
     checkpoints = Checkpoint.query.filter_by(shipment_id=shipment.id).order_by(Checkpoint.position).all()
     return render_template("track.html", shipment=shipment, checkpoints=checkpoints)
 
-# Authentication
+# --- Authentication ---
 @app.route("/admin/login", methods=["POST"])
 @limiter.limit("5/minute")
 def admin_login():
@@ -156,7 +162,7 @@ def admin_login():
     
     return jsonify({"error": "Invalid credentials"}), 401
 
-# API Endpoints
+# --- API Endpoints ---
 @app.route("/api/shipments/<tracking>")
 def api_get_shipment(tracking):
     shipment = Shipment.query.filter_by(tracking=tracking).first_or_404()
@@ -227,7 +233,7 @@ def api_add_checkpoint(tracking):
     
     return jsonify({"ok": True}), 201
 
-# Celery task for email
+# --- Celery task for email ---
 @celery.task
 def send_checkpoint_email_task(shipment_id: int, checkpoint_id: int):
     from email_utils import send_checkpoint_email_async
@@ -236,7 +242,7 @@ def send_checkpoint_email_task(shipment_id: int, checkpoint_id: int):
     if shipment and checkpoint:
         send_checkpoint_email_async(shipment.to_dict(), checkpoint.to_dict())
 
-# WebSocket
+# --- WebSocket ---
 @socketio.on("subscribe")
 def handle_subscribe(tracking):
     shipment = Shipment.query.filter_by(tracking=tracking).first()
@@ -251,7 +257,7 @@ def handle_subscribe(tracking):
             } for cp in checkpoints]
         })
 
-# Admin routes
+# --- Admin routes ---
 @app.route("/api/admin/shipments")
 @jwt_required()
 def api_admin_shipments():
@@ -266,13 +272,14 @@ def api_admin_shipments():
         "updated_at": s.updated_at
     } for s in shipments])
 
-# Initialize DB
+# --- DB initialization ---
 @app.cli.command("init-db")
 def init_db():
+    """Initialize the database tables."""
     db.create_all()
     print("Database initialized.")
 
-# Telegram bot integration
+# --- Telegram bot integration ---
 def start_telegram_bot():
     if not os.getenv("TELEGRAM_TOKEN"):
         return
@@ -287,7 +294,7 @@ def start_telegram_bot():
         app.logger.error("Failed to start Telegram bot: %s", str(e))
 
 if __name__ == "__main__":
-    # Initialize database
+    # Initialize database (safe for local dev, for production use flask init-db once)
     with app.app_context():
         db.create_all()
     
