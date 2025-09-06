@@ -46,8 +46,9 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 celery = Celery(app.name, broker=app.config["CELERY_BROKER_URL"])
 celery.conf.update(app.config)
 
-# Rate limiting
-limiter = Limiter(app, key_func=get_remote_address)
+# Rate limiting (Flask-Limiter v3+ compatible)
+limiter = Limiter(key_func=get_remote_address)
+limiter.init_app(app)
 
 # Models
 class Shipment(db.Model):
