@@ -1,4 +1,4 @@
--- schema.sql for Consignment Tracker
+-- Consignment Tracker schema for PostgreSQL
 
 CREATE TABLE IF NOT EXISTS shipment (
     id SERIAL PRIMARY KEY,
