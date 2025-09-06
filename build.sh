@@ -10,10 +10,13 @@ if [ -d frontend ]; then
   mkdir -p static/admin-app
   if [ -d frontend-dist ]; then
     cp -r frontend-dist/* static/admin-app/
+    echo "Copied from frontend-dist/"
   elif [ -d frontend/dist ]; then
     cp -r frontend/dist/* static/admin-app/
+    echo "Copied from frontend/dist/"
   else
-    echo "Frontend build folder not found - check Vite output"
+    echo "ERROR: Frontend build folder not found - check Vite output"
+    exit 1
   fi
 else
   echo "No frontend directory - skipping frontend build"
