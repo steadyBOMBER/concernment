@@ -1,20 +1,3 @@
-# Build stage (Node)
-FROM node:20-bullseye AS node-builder
-WORKDIR /work/frontend
-
-# Copy only the manifest files first (better caching)
-COPY frontend/package*.json ./
-
-# Install dependencies
-RUN npm install --legacy-peer-deps
-
-# Copy the rest of the frontend source
-COPY frontend/ .
-
-# Build the frontend
-RUN npm run build
-
-# Runtime (Python)
 FROM python:3.11-slim
 WORKDIR /app
 
