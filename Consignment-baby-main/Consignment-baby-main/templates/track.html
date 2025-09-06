@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card">
+  <h1>{{ shipment['title'] }} — <small class="muted">Tracking: {{ shipment['tracking'] }}</small></h1>
+  <div id="map" style="height:420px; margin-bottom:1rem;"></div>
+  <div class="grid-2">
+    <div>
+      <h3>Status & Checkpoints</h3>
+      <ol id="timeline" class="timeline"></ol>
+    </div>
+    <div>
+      <h3>Email updates</h3>
+      <form id="sub-form" class="stack">
+        <label>Email <input id="email" type="email" required></label>
+        <button>Subscribe</button>
+      </form>
+    </div>
+  </div>
+</section>
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const SHIP = {{ shipment | tojson }};
+const CPS = {{ checkpoints | tojson }};
+function init(){
+  const map = L.map('map');
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
+  const points = [[SHIP.origin_lat, SHIP.origin_lng], ...CPS.map(c=>[c.lat,c.lng]), [SHIP.dest_lat, SHIP.dest_lng]];
+  L.polyline(points).addTo(map);
+  map.fitBounds(points, {padding:[30,30]});
+  L.marker([SHIP.origin_lat, SHIP.origin_lng]).addTo(map).bindPopup('Origin');
+  CPS.forEach(c=>L.marker([c.lat,c.lng]).addTo(map).bindPopup(c.label));
+  L.marker([SHIP.dest_lat, SHIP.dest_lng]).addTo(map).bindPopup('Destination');
+
+  const list = document.getElementById('timeline');
+  CPS.forEach(c=>{
+    const li = document.createElement('li');
+    li.innerHTML = `<strong>${c.label}</strong> — ${new Date(c.timestamp).toLocaleString()}<br><span class="muted">${c.note||''}</span>`;
+    list.appendChild(li);
+  });
+
+  document.getElementById('sub-form').addEventListener('submit', async (e)=>{
+    e.preventDefault();
+    const email = document.getElementById('email').value;
+    const res = await fetch(`/api/shipments/${encodeURIComponent(SHIP.tracking)}/subscribe`, {
+      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({email})
+    });
+    if(res.ok){ alert('Subscribed!'); document.getElementById('email').value=''; } else { alert('Error'); }
+  });
+}
+document.addEventListener('DOMContentLoaded', init);
+</script>
+{% endblock %}
