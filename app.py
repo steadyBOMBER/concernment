@@ -22,7 +22,7 @@ def get_database_url():
         url = url.replace("postgres://", "postgresql://", 1)
     return url
 
-app = Flask(__name__, static_folder="static", template_folder="templates")
+app = Flask(__name__, static_folder="frontend", template_folder="templates")
 app.config.from_mapping(
     SECRET_KEY=os.environ.get("SECRET_KEY", "dev-secret"),
     SQLALCHEMY_DATABASE_URI=get_database_url(),
