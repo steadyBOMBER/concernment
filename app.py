@@ -17,11 +17,27 @@ from flask_socketio import SocketIO, emit
 from celery import Celery
 from pydantic import BaseModel, Field, ValidationError
 from werkzeug.security import generate_password_hash, check_password_hash
+from retry import retry
+
+# --- Logging Configuration ---
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+)
+logger = logging.getLogger(__name__)
 
 # --- Configuration and Initialization ---
+def validate_config():
+    """Validate required environment variables."""
+    required_envs = ["SECRET_KEY", "JWT_SECRET_KEY", "ADMIN_PASSWORD"]
+    for env in required_envs:
+        if not os.environ.get(env):
+            logger.error(f"Missing required environment variable: {env}")
+            raise ValueError(f"Missing {env}")
+    logger.info("Environment variables validated successfully")
 
 def get_database_url():
-    """Patch for Render and other platforms that provide DATABASE_URL with 'postgres://' scheme."""
+    """Patch for Render and other platforms with 'postgres://' scheme."""
     url = os.environ.get("DATABASE_URL", "sqlite:///consignment.db")
     if url.startswith("postgres://"):
         url = url.replace("postgres://", "postgresql://", 1)
@@ -29,23 +45,30 @@ def get_database_url():
 
 app = Flask(__name__, static_folder="static", template_folder="templates")
 app.config.from_mapping(
-    SECRET_KEY=os.environ.get("SECRET_KEY", "dev-secret"),
+    SECRET_KEY=os.environ.get("SECRET_KEY"),
     SQLALCHEMY_DATABASE_URI=get_database_url(),
     SQLALCHEMY_TRACK_MODIFICATIONS=False,
-    JWT_SECRET_KEY=os.environ.get("JWT_SECRET_KEY", "super-secret-key"),
+    JWT_SECRET_KEY=os.environ.get("JWT_SECRET_KEY"),
     CELERY_BROKER_URL=os.environ.get("REDIS_URL", "redis://localhost:6379/0"),
-    ADMIN_PASSWORD_HASH=generate_password_hash(os.environ.get("ADMIN_PASSWORD", "change-me")),
+    ADMIN_PASSWORD_HASH=generate_password_hash(os.environ.get("ADMIN_PASSWORD")),
     SMTP_HOST=os.environ.get("SMTP_HOST", ""),
     SMTP_PORT=int(os.environ.get("SMTP_PORT", "587")),
     SMTP_USER=os.environ.get("SMTP_USER", ""),
     SMTP_PASS=os.environ.get("SMTP_PASS", ""),
     SMTP_FROM=os.environ.get("SMTP_FROM", "no-reply@example.com"),
-    APP_BASE_URL=os.environ.get("APP_BASE_URL", "http://localhost:5000")
+    APP_BASE_URL=os.environ.get("APP_BASE_URL", "http://localhost:5000"),
+    SESSION_COOKIE_SECURE=True,
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    PERMANENT_SESSION_LIFETIME=timedelta(minutes=30)
 )
+
+# Validate configuration before proceeding
+validate_config()
 
 db = SQLAlchemy(app)
 jwt = JWTManager(app)
-socketio = SocketIO(app, cors_allowed_origins="*")
+socketio = SocketIO(app, cors_allowed_origins=os.environ.get("ALLOWED_ORIGINS", "http://localhost:5000"))
 celery = Celery(app.name, broker=app.config["CELERY_BROKER_URL"])
 celery.conf.update(app.config)
 limiter = Limiter(key_func=get_remote_address)
@@ -104,13 +127,22 @@ class Subscriber(db.Model):
     email = db.Column(db.String(100), nullable=False)
     is_active = db.Column(db.Boolean, default=True)
 
-# --- Ensure tables exist on startup (for environments without CLI) ---
-with app.app_context():
-    try:
-        db.create_all()
-        print("[INFO] Database tables ensured (created if missing).")
-    except Exception as e:
-        print(f"[ERROR] Could not create tables: {e}")
+# --- Ensure tables exist on startup with retry ---
+@retry(tries=3, delay=2, backoff=2)
+def ensure_tables():
+    with app.app_context():
+        try:
+            db.create_all()
+            logger.info("Database tables ensured (created if missing).")
+        except Exception as e:
+            logger.error(f"Could not create tables: {e}")
+            raise
+
+try:
+    ensure_tables()
+except Exception as e:
+    logger.error(f"Failed to initialize database after retries: {e}")
+    raise
 
 # --- Pydantic models for validation ---
 class CheckpointCreate(BaseModel):
@@ -133,7 +165,7 @@ def set_security_headers(response):
         "X-Frame-Options": "DENY",
         "X-Content-Type-Options": "nosniff",
         "Referrer-Policy": "no-referrer-when-downgrade",
-        "Content-Security-Policy": "default-src 'self' 'unsafe-inline' data: https:;"
+        "Content-Security-Policy": "default-src 'self' 'unsafe-inline' data:; script-src 'self' https://trusted.cdn.com;"
     }
     for k, v in headers.items():
         response.headers.setdefault(k, v)
@@ -159,8 +191,10 @@ def admin_login():
         return jsonify({"error": "Missing credentials"}), 400
     if (data["user"] == os.environ.get("ADMIN_USER", "admin") and 
         check_password_hash(app.config["ADMIN_PASSWORD_HASH"], data["password"])):
-        access_token = create_access_token(identity=data["user"])
+        access_token = create_access_token(identity=data["user"], expires_delta=timedelta(hours=1))
+        logger.info(f"Admin login successful for user: {data['user']}")
         return jsonify(access_token=access_token)
+    logger.warning(f"Admin login failed for user: {data.get('user', 'unknown')}")
     return jsonify({"error": "Invalid credentials"}), 401
 
 # --- API Endpoints ---
@@ -185,72 +219,99 @@ def api_get_shipment(tracking):
     })
 
 @app.route("/api/shipments", methods=["POST"])
+@limiter.limit("10/minute")
 def api_create_shipment():
     try:
         data = ShipmentCreate(**request.get_json())
     except ValidationError as e:
+        logger.warning(f"Invalid shipment data: {str(e)}")
         return jsonify({"error": str(e)}), 400
     if Shipment.query.filter_by(tracking=data.tracking_number).first():
+        logger.warning(f"Attempt to create duplicate tracking number: {data.tracking_number}")
         return jsonify({"error": "Tracking number exists"}), 400
-    shipment = Shipment(
-        tracking=data.tracking_number,
-        title=data.title,
-        origin_lat=data.origin["lat"],
-        origin_lng=data.origin["lng"],
-        dest_lat=data.destination["lat"],
-        dest_lng=data.destination["lng"],
-        status=data.status
-    )
-    db.session.add(shipment)
-    db.session.commit()
-    return jsonify({"ok": True}), 201
+    try:
+        shipment = Shipment(
+            tracking=data.tracking_number,
+            title=data.title,
+            origin_lat=data.origin["lat"],
+            origin_lng=data.origin["lng"],
+            dest_lat=data.destination["lat"],
+            dest_lng=data.destination["lng"],
+            status=data.status
+        )
+        db.session.add(shipment)
+        db.session.commit()
+        logger.info(f"Created shipment: {data.tracking_number}")
+        return jsonify({"ok": True, "tracking": data.tracking_number}), 201
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Failed to create shipment: {e}")
+        return jsonify({"error": "Internal server error"}), 500
 
 @app.route("/api/shipments/<tracking>/checkpoints", methods=["POST"])
+@limiter.limit("10/minute")
 def api_add_checkpoint(tracking):
     shipment = Shipment.query.filter_by(tracking=tracking).first_or_404()
     try:
         data = CheckpointCreate(**request.get_json())
     except ValidationError as e:
+        logger.warning(f"Invalid checkpoint data for tracking {tracking}: {str(e)}")
         return jsonify({"error": str(e)}), 400
-    position = Checkpoint.query.filter_by(shipment_id=shipment.id).count()
-    checkpoint = Checkpoint(
-        shipment_id=shipment.id,
-        position=position,
-        lat=data.lat,
-        lng=data.lng,
-        label=data.label,
-        note=data.note
-    )
-    db.session.add(checkpoint)
-    shipment.updated_at = datetime.utcnow()
-    db.session.commit()
-    # Celery task for async email
-    send_checkpoint_email_task.delay(shipment.id, checkpoint.id)
-    return jsonify({"ok": True}), 201
+    try:
+        position = Checkpoint.query.filter_by(shipment_id=shipment.id).count()
+        checkpoint = Checkpoint(
+            shipment_id=shipment.id,
+            position=position,
+            lat=data.lat,
+            lng=data.lng,
+            label=data.label,
+            note=data.note
+        )
+        shipment.updated_at = datetime.utcnow()
+        db.session.add(checkpoint)
+        db.session.commit()
+        logger.info(f"Added checkpoint to shipment: {tracking}")
+        send_checkpoint_email_task.delay(shipment.id, checkpoint.id)
+        return jsonify({"ok": True}), 201
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Failed to add checkpoint to {tracking}: {e}")
+        return jsonify({"error": "Internal server error"}), 500
 
 # --- Celery task for email ---
-@celery.task
-def send_checkpoint_email_task(shipment_id: int, checkpoint_id: int):
-    from email_utils import send_checkpoint_email_async
-    shipment = Shipment.query.get(shipment_id)
-    checkpoint = Checkpoint.query.get(checkpoint_id)
-    if shipment and checkpoint:
-        send_checkpoint_email_async(shipment.to_dict(), checkpoint.to_dict())
+@celery.task(bind=True, max_retries=3, retry_backoff=True)
+def send_checkpoint_email_task(self, shipment_id: int, checkpoint_id: int):
+    try:
+        from email_utils import send_checkpoint_email_async
+        shipment = Shipment.query.get(shipment_id)
+        checkpoint = Checkpoint.query.get(checkpoint_id)
+        if shipment and checkpoint:
+            send_checkpoint_email_async(shipment.to_dict(), checkpoint.to_dict())
+            logger.info(f"Sent email for checkpoint {checkpoint_id} of shipment {shipment_id}")
+        else:
+            logger.warning(f"Shipment {shipment_id} or checkpoint {checkpoint_id} not found")
+    except Exception as e:
+        logger.error(f"Email task failed for shipment {shipment_id}, checkpoint {checkpoint_id}: {e}")
+        raise self.retry(exc=e)
 
 # --- WebSocket ---
 @socketio.on("subscribe")
 def handle_subscribe(tracking):
     shipment = Shipment.query.filter_by(tracking=tracking).first()
-    if shipment:
-        checkpoints = Checkpoint.query.filter_by(shipment_id=shipment.id).order_by(Checkpoint.position).all()
-        emit("update", {
-            "tracking": shipment.tracking,
-            "checkpoints": [{
-                "lat": cp.lat,
-                "lng": cp.lng,
-                "label": cp.label
-            } for cp in checkpoints]
-        })
+    if not shipment:
+        logger.warning(f"WebSocket subscription failed for invalid tracking: {tracking}")
+        emit("error", {"message": "Invalid tracking number"})
+        return
+    checkpoints = Checkpoint.query.filter_by(shipment_id=shipment.id).order_by(Checkpoint.position).all()
+    emit("update", {
+        "tracking": shipment.tracking,
+        "checkpoints": [{
+            "lat": cp.lat,
+            "lng": cp.lng,
+            "label": cp.label
+        } for cp in checkpoints]
+    })
+    logger.info(f"WebSocket subscription successful for tracking: {tracking}")
 
 # --- Admin routes ---
 @app.route("/api/admin/shipments")
@@ -276,18 +337,19 @@ def admin_app(path):
 # --- Telegram bot integration ---
 def start_telegram_bot():
     if not os.getenv("TELEGRAM_TOKEN"):
+        logger.info("No TELEGRAM_TOKEN provided, skipping bot startup")
         return
     try:
         from telegram_bot import start_bot_async
-        start_bot_async()
-        app.logger.info("Telegram bot started in background")
+        bot_thread = threading.Thread(target=start_bot_async, daemon=True)
+        bot_thread.start()
+        logger.info("Telegram bot started in background thread")
     except ImportError:
-        app.logger.warning("Telegram bot module not available")
+        logger.warning("Telegram bot module not available")
     except Exception as e:
-        app.logger.error("Failed to start Telegram bot: %s", str(e))
+        logger.error(f"Failed to start Telegram bot: {e}")
 
 if __name__ == "__main__":
-    # DB tables are already ensured above for all environments
     # Start Telegram bot if configured
     start_telegram_bot()
     # Run app
