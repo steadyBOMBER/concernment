@@ -1,17 +1,9 @@
-"""
-Main Flask app for Consignment Tracker (updated for thread-safety, validation, security, async email, and cloud-ready DB handling).
-"""
-
 import os
-import threading
-import logging
-from datetime import datetime, timedelta
-from functools import wraps
+from datetime import datetime
 from typing import Optional, Dict, Any
 
 from flask import (
-    Flask, render_template, request, redirect, url_for,
-    jsonify, send_from_directory, current_app, session
+    Flask, render_template, request, jsonify
 )
 from flask_jwt_extended import JWTManager, create_access_token, jwt_required
 from flask_limiter import Limiter
@@ -25,7 +17,6 @@ from werkzeug.security import generate_password_hash, check_password_hash
 # --- Configuration and Initialization ---
 
 def get_database_url():
-    """Patch for Render and other platforms that provide DATABASE_URL with 'postgres://' scheme."""
     url = os.environ.get("DATABASE_URL", "sqlite:///consignment.db")
     if url.startswith("postgres://"):
         url = url.replace("postgres://", "postgresql://", 1)
@@ -52,7 +43,6 @@ jwt = JWTManager(app)
 socketio = SocketIO(app, cors_allowed_origins="*")
 celery = Celery(app.name, broker=app.config["CELERY_BROKER_URL"])
 celery.conf.update(app.config)
-
 limiter = Limiter(key_func=get_remote_address)
 limiter.init_app(app)
 
@@ -154,12 +144,10 @@ def admin_login():
     data = request.get_json()
     if not data or "user" not in data or "password" not in data:
         return jsonify({"error": "Missing credentials"}), 400
-    
     if (data["user"] == os.environ.get("ADMIN_USER", "admin") and 
         check_password_hash(app.config["ADMIN_PASSWORD_HASH"], data["password"])):
         access_token = create_access_token(identity=data["user"])
         return jsonify(access_token=access_token)
-    
     return jsonify({"error": "Invalid credentials"}), 401
 
 # --- API Endpoints ---
@@ -189,10 +177,8 @@ def api_create_shipment():
         data = ShipmentCreate(**request.get_json())
     except ValidationError as e:
         return jsonify({"error": str(e)}), 400
-
     if Shipment.query.filter_by(tracking=data.tracking_number).first():
         return jsonify({"error": "Tracking number exists"}), 400
-
     shipment = Shipment(
         tracking=data.tracking_number,
         title=data.title,
@@ -209,12 +195,10 @@ def api_create_shipment():
 @app.route("/api/shipments/<tracking>/checkpoints", methods=["POST"])
 def api_add_checkpoint(tracking):
     shipment = Shipment.query.filter_by(tracking=tracking).first_or_404()
-    
     try:
         data = CheckpointCreate(**request.get_json())
     except ValidationError as e:
         return jsonify({"error": str(e)}), 400
-
     position = Checkpoint.query.filter_by(shipment_id=shipment.id).count()
     checkpoint = Checkpoint(
         shipment_id=shipment.id,
@@ -227,10 +211,8 @@ def api_add_checkpoint(tracking):
     db.session.add(checkpoint)
     shipment.updated_at = datetime.utcnow()
     db.session.commit()
-
     # Celery task for async email
     send_checkpoint_email_task.delay(shipment.id, checkpoint.id)
-    
     return jsonify({"ok": True}), 201
 
 # --- Celery task for email ---
@@ -283,7 +265,6 @@ def init_db():
 def start_telegram_bot():
     if not os.getenv("TELEGRAM_TOKEN"):
         return
-    
     try:
         from telegram_bot import start_bot_async
         start_bot_async()
@@ -297,10 +278,8 @@ if __name__ == "__main__":
     # Initialize database (safe for local dev, for production use flask init-db once)
     with app.app_context():
         db.create_all()
-    
     # Start Telegram bot if configured
     start_telegram_bot()
-    
     # Run app
     port = int(os.environ.get("PORT", 5000))
     socketio.run(app, host="0.0.0.0", port=port, debug=bool(os.getenv("FLASK_DEBUG")))
