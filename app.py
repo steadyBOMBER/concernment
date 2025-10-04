@@ -51,14 +51,6 @@ celery.conf.update(app.config)
 limiter = Limiter(key_func=get_remote_address)
 limiter.init_app(app)
 
-# --- Ensure tables exist on startup (for environments without CLI) ---
-with app.app_context():
-    try:
-        db.create_all()
-        print("[INFO] Database tables ensured (created if missing).")
-    except Exception as e:
-        print(f"[ERROR] Could not create tables: {e}")
-
 # --- Models ---
 class Shipment(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -111,6 +103,14 @@ class Subscriber(db.Model):
     shipment_id = db.Column(db.Integer, db.ForeignKey("shipment.id"), nullable=False)
     email = db.Column(db.String(100), nullable=False)
     is_active = db.Column(db.Boolean, default=True)
+
+# --- Ensure tables exist on startup (for environments without CLI) ---
+with app.app_context():
+    try:
+        db.create_all()
+        print("[INFO] Database tables ensured (created if missing).")
+    except Exception as e:
+        print(f"[ERROR] Could not create tables: {e}")
 
 # --- Pydantic models for validation ---
 class CheckpointCreate(BaseModel):
@@ -266,6 +266,12 @@ def api_admin_shipments():
         "destination": {"lat": s.dest_lat, "lng": s.dest_lng},
         "updated_at": s.updated_at
     } for s in shipments])
+
+# --- Serve React Admin (Production SPA Build) ---
+@app.route('/admin/app', defaults={'path': ''})
+@app.route('/admin/app/<path:path>')
+def admin_app(path):
+    return send_from_directory('static/admin-app', 'index.html')
 
 # --- Telegram bot integration ---
 def start_telegram_bot():
